@@ -10,6 +10,7 @@ import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 import com.leapauto.app.ControlService
+import com.leapauto.app.ControlRequestActivity
 import com.leapauto.app.R
 import com.leapauto.app.SessionStore
 
@@ -54,11 +55,6 @@ class ClimateTileService : TileService() {
             updateTileState(inProgress = false, customSubtitle = "未选择车辆")
             return
         }
-        if (store.loadOpPassword().isNullOrBlank()) {
-            updateTileState(inProgress = false, customSubtitle = "未设置密码")
-            return
-        }
-
         if (ControlService.isCommandInFlight()) {
             android.widget.Toast.makeText(context, "已有控车指令执行中，请稍候", android.widget.Toast.LENGTH_SHORT).show()
             updateTileState(inProgress = true, customSubtitle = "指令执行中...")
@@ -71,11 +67,9 @@ class ClimateTileService : TileService() {
 
         updateTileState(inProgress = true, customSubtitle = if (isAcOn) "正在关闭空调..." else "正在开启24℃空调...")
 
-        val intent = Intent(context, ControlService::class.java).apply {
-            putExtra(ControlService.EXTRA_COMMAND, targetCommand)
-        }
+        val intent = ControlRequestActivity.commandIntent(this, targetCommand)
         try {
-            startForegroundService(intent)
+            ControlRequestActivity.launchFromTile(this, intent)
         } catch (e: Exception) {
             Log.e(TAG, "启动空调服务异常: ${e.message}")
         }

@@ -4,12 +4,11 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.graphics.drawable.Icon
 import android.os.Build
-import android.os.Handler
-import android.os.Looper
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.util.Log
 import com.leapauto.app.ControlService
+import com.leapauto.app.ControlRequestActivity
 import com.leapauto.app.R
 import com.leapauto.app.SessionStore
 
@@ -18,8 +17,6 @@ import com.leapauto.app.SessionStore
  * 具备锁闭状态自适应反馈：已上锁时点击安全解锁，未锁时点击一键上锁。
  */
 class LockToggleTileService : TileService() {
-
-    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onTileAdded() {
         super.onTileAdded()
@@ -56,11 +53,6 @@ class LockToggleTileService : TileService() {
             updateTileState(inProgress = false, customSubtitle = "未选择车辆")
             return
         }
-        if (store.loadOpPassword().isNullOrBlank()) {
-            updateTileState(inProgress = false, customSubtitle = "未设置密码")
-            return
-        }
-
         if (ControlService.isCommandInFlight()) {
             android.widget.Toast.makeText(context, "已有控车指令执行中，请稍候", android.widget.Toast.LENGTH_SHORT).show()
             updateTileState(inProgress = true, customSubtitle = "指令执行中...")
@@ -93,30 +85,12 @@ class LockToggleTileService : TileService() {
     }
 
     private fun executeLockCommand(command: String) {
-        val isUnlock = command == "unlock"
-        val targetLockState = !isUnlock
-        val store = SessionStore(applicationContext)
-        val session = store.load()
-        if (session.selectedVin.isNotBlank()) {
-            store.updateWidgetLockState(session.selectedVin, targetLockState)
-        }
-        updateTileState(inProgress = true, customSubtitle = if (isUnlock) "正在解锁..." else "正在上锁...", forceTargetLock = targetLockState)
-
-        val intent = Intent(applicationContext, ControlService::class.java).apply {
-            putExtra(ControlService.EXTRA_COMMAND, command)
-        }
+        val intent = ControlRequestActivity.commandIntent(this, command)
         try {
-            startForegroundService(intent)
+            ControlRequestActivity.launchFromTile(this, intent)
         } catch (e: Exception) {
             Log.e(TAG, "启动门锁服务异常: ${e.message}")
         }
-
-        mainHandler.removeCallbacksAndMessages(null)
-        mainHandler.postDelayed({
-            if (!ControlService.isCommandInFlight()) {
-                updateTileState(inProgress = false, forceTargetLock = targetLockState)
-            }
-        }, 10_000L)
     }
 
     private fun updateTileState(

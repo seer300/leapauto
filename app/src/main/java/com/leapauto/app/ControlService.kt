@@ -24,6 +24,31 @@ class ControlService : Service() {
         @Volatile private var lastSensitiveCommand: String? = null
         @Volatile private var lastSensitiveEpochMs: Long = 0L
 
+        internal const val EXTRA_ALLOW_BLUETOOTH = "allow_bluetooth"
+        internal const val EXTRA_PROMPT_RECEIVER = "prompt_receiver"
+        internal const val SHOW_PIN_PROMPT = 1
+        private const val EXTRA_SUBMISSION_ID = "submission_id"
+        private val pendingPin = java.util.concurrent.atomic.AtomicReference<PinSubmission?>()
+
+        private data class PinSubmission(val id: String, val request: ExternalControlRequest, val pin: String)
+
+        internal fun submitPin(context: android.content.Context, request: ExternalControlRequest, pin: String) {
+            require(OperationPin.isValid(pin))
+            val submission = PinSubmission(java.util.UUID.randomUUID().toString(), request, pin)
+            check(pendingPin.compareAndSet(null, submission))
+            val intent = Intent(context, ControlService::class.java).putExtra(EXTRA_SUBMISSION_ID, submission.id)
+            try {
+                context.startForegroundService(intent)
+            } catch (error: Exception) {
+                pendingPin.compareAndSet(submission, null)
+                throw error
+            }
+            val submissionId = submission.id
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                pendingPin.get()?.takeIf { it.id == submissionId }?.let { pendingPin.compareAndSet(it, null) }
+            }, ExternalControlRequest.EXPIRY_MS)
+        }
+
         private val commandInFlight = AtomicBoolean(false)
         fun isCommandInFlight(): Boolean = commandInFlight.get()
     }
@@ -40,8 +65,15 @@ class ControlService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(FGS_NOTIF_ID, notification("控车中..."))
-        val command = intent?.getStringExtra(EXTRA_COMMAND)
+        @Suppress("DEPRECATION")
+        val promptReceiver = intent?.getParcelableExtra<android.os.ResultReceiver>(EXTRA_PROMPT_RECEIVER)
+        val allowBluetooth = intent?.getBooleanExtra(EXTRA_ALLOW_BLUETOOTH, false) == true
+        val submissionId = intent?.getStringExtra(EXTRA_SUBMISSION_ID)
+        val submission = pendingPin.get()?.takeIf { submissionId == it.id &&
+            pendingPin.compareAndSet(it, null) }
+        val command = if (submissionId != null) submission?.request?.command else intent?.getStringExtra(EXTRA_COMMAND)
         if (command == null) {
+            promptReceiver?.send(0, null)
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelfResult(startId)
             return START_NOT_STICKY
@@ -50,7 +82,7 @@ class ControlService : Service() {
         // 方案 A：桌面小组件高敏感操作 3 秒双击确认防误触机制
         val store = SessionStore(this)
         val verificationEnabled = store.loadWidgetSensitiveActionVerificationEnabled()
-        if (WidgetControlSecurity.requiresVerification(command, verificationEnabled)) {
+        if (submission == null && WidgetControlSecurity.requiresVerification(command, verificationEnabled)) {
             val now = System.currentTimeMillis()
             val confirmed = WidgetControlSecurity.isDoubleClickConfirmed(
                 lastCommand = lastSensitiveCommand,
@@ -71,6 +103,7 @@ class ControlService : Service() {
                 }
                 store.setWidgetBusyCommand(null)
                 ControlWidget.showControlStatus(this, hint)
+                promptReceiver?.send(0, null)
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelfResult(startId)
                 return START_NOT_STICKY
@@ -84,13 +117,13 @@ class ControlService : Service() {
             store.setWidgetBusyCommand(null)
             ControlWidget.showControlStatus(this, "已有控车指令执行中")
             notifyResult("已有控车指令执行中")
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelfResult(startId)
+            promptReceiver?.send(0, null)
             return START_NOT_STICKY
         }
         // 按钮已具备忙碌转圈动效，执行过程中不再展示“控车中…”文本覆盖，保持桌面时间与车内温度常驻
         Thread {
             val store = SessionStore(this)
+            var pinRequest: ExternalControlRequest? = null
             try {
                 val session = store.load()
                 val snapshot = store.loadWidgetSnapshot(session.selectedVin)
@@ -98,30 +131,37 @@ class ControlService : Service() {
                     SessionStore.WidgetAccess.CONTROL -> Unit
                     SessionStore.WidgetAccess.NO_SESSION -> throw ApiException("请打开 App 登录")
                 }
-                val pin = store.loadOpPassword()
                 if (session.oldAuth == null || session.newAuth == null) {
                     throw ApiException("未登录，请先打开 App 登录")
                 }
-                if (pin.isNullOrBlank()) {
-                    throw ApiException("未设置操作密码，请先打开 App 保存")
-                }
                 val isWinOpen = snapshot?.windowOpen == true
-                val effectiveCommand = WidgetWindowTogglePolicy.resolveCommand(command, isWinOpen)
+                val effectiveCommand = if (submission == null) WidgetWindowTogglePolicy.resolveCommand(command, isWinOpen) else command
                 val isLockCmd = effectiveCommand == "lock" || effectiveCommand == "unlock"
                 val bleRuntime = com.leapauto.app.bluetooth.BleKeyRuntime.get(this)
                 val bleController = bleRuntime.controller
-                if (isLockCmd && bleController.state.canControl) {
+                if (submission == null && allowBluetooth && isLockCmd && bleController.state.canControl) {
+                    store.setWidgetBusyCommand(effectiveCommand)
+                    ControlWidget.refreshData(this)
                     val isLock = effectiveCommand == "lock"
                     val action = if (isLock) com.leapauto.app.bluetooth.BleLockAction.LOCK else com.leapauto.app.bluetooth.BleLockAction.UNLOCK
                     val appContext = applicationContext
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    val started = java.util.concurrent.FutureTask {
+                        val before = bleController.state
                         bleController.control(action)
+                        bleController.state !== before && bleController.state.pendingAction == action
+                    }
+                    android.os.Handler(android.os.Looper.getMainLooper()).post(started)
+                    val sent = try {
+                        started.get(1500L, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    } catch (_: java.util.concurrent.TimeoutException) {
+                        started.cancel(false)
+                        false
                     }
 
                     // 等待车端蓝牙物理回执确认 (车端通常在 100ms 内极速回执，最多等待 1500ms)
                     var bleConfirmed = false
                     val startWait = System.currentTimeMillis()
-                    while (System.currentTimeMillis() - startWait < 1500L) {
+                    while (sent && System.currentTimeMillis() - startWait < 1500L) {
                         Thread.sleep(50L)
                         val currentState = bleController.state
                         if (currentState.confirmedAction == action) {
@@ -174,8 +214,15 @@ class ControlService : Service() {
                         }
                         return@Thread
                     }
-                    // 若蓝牙因信号受阻或车端未在 1.5 秒内确认，自动无缝平滑回退至下方 4G 云端通道进行兜底控锁
                 }
+                if (submission == null) {
+                    pinRequest = ExternalControlRequest.create(session, effectiveCommand)
+                    return@Thread
+                }
+                if (!submission.request.isCurrent(session)) throw ApiException("控车请求已失效，请重新发起")
+                store.setWidgetBusyCommand(effectiveCommand)
+                ControlWidget.refreshData(this)
+                val pin = submission.pin
                 val api = LeapmotorApi(session)
                 val cmd = Commands.build(effectiveCommand)
                 val result = api.sendControl(cmd, pin)
@@ -281,16 +328,28 @@ class ControlService : Service() {
                     }.start()
                 }
             } catch (e: Exception) {
-                val error = e.message ?: "控车失败"
+                val error = if (OperationPasswordErrorPolicy.isPasswordError(e)) {
+                    OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE
+                } else {
+                    e.message ?: "控车失败"
+                }
                 ControlWidget.showControlStatus(this, error)
                 notifyResult(error)
             } finally {
-                store.setWidgetBusyCommand(null)
-                ControlWidget.refreshData(applicationContext)
-                commandInFlight.set(false)
-                com.leapauto.app.tiles.TilePromptHelper.requestTilesUpdate(applicationContext)
-                stopForeground(STOP_FOREGROUND_REMOVE)
-                stopSelfResult(startId)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    store.setWidgetBusyCommand(null)
+                    ControlWidget.refreshData(applicationContext)
+                    commandInFlight.set(false)
+                    com.leapauto.app.tiles.TilePromptHelper.requestTilesUpdate(applicationContext)
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                    val request = pinRequest
+                    if (request == null) {
+                        promptReceiver?.send(0, null)
+                    } else {
+                        promptReceiver?.send(SHOW_PIN_PROMPT, request.toBundle())
+                    }
+                }
             }
         }.start()
         return START_NOT_STICKY

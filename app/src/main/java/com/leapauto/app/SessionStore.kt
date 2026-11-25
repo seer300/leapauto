@@ -13,7 +13,7 @@ val SUPPORTED_VEHICLE_MODELS = listOf(
     "B10", "C10", "A10", "Lafa5"
 )
 
-/** 会话与操作密码的本地持久化（应用私有存储）。 */
+/** 会话的本地持久化（应用私有存储）。 */
 class SessionStore(context: Context) {
 
     enum class VehiclePowerType { PURE_ELECTRIC, RANGE_EXTENDER }
@@ -79,6 +79,10 @@ class SessionStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences("leap_session", Context.MODE_PRIVATE)
     private val appPrefs = appContext.getSharedPreferences("leap_app_preferences", Context.MODE_PRIVATE)
+    init {
+        if (prefs.contains("op_password")) prefs.edit().remove("op_password").commit()
+    }
+
     private val secureValues = SecureValueStore(context, prefs)
 
     /**
@@ -207,12 +211,6 @@ class SessionStore(context: Context) {
         editor.commit()
     }
 
-    fun loadOpPassword(): String? = secureValues.getString("op_password")?.takeIf { it.matches(Regex("\\d{4}")) }
-
-    fun saveOpPassword(password: String) {
-        require(password.isBlank() || password.matches(Regex("\\d{4}"))) { "操作密码必须为 4 位数字" }
-        secureValues.putString(prefs.edit(), "op_password", password).commit()
-    }
 
     /** 快捷空调默认温度（本地缓存偏好）。 */
     fun loadAcTemp(): Int = prefs.getInt("ac_temp", 24)
