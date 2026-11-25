@@ -1762,7 +1762,7 @@ object SunroofCapabilityPolicy {
 }
 
 object OperationPasswordErrorPolicy {
-    const val ERROR_PROMPT_MESSAGE = "密码错误，请更新密码"
+    const val ERROR_PROMPT_MESSAGE = "操控密码错误，请重新输入"
 
     fun isPasswordError(error: Throwable?): Boolean {
         val raw = error?.message.orEmpty().lowercase()
@@ -1779,11 +1779,6 @@ object OperationPasswordErrorPolicy {
     }
 }
 
-object PostLoginPinSetupPolicy {
-    fun shouldPromptPinSetup(isNewLogin: Boolean, pinSaved: Boolean): Boolean {
-        return isNewLogin && !pinSaved
-    }
-}
 
 object RearSeatComfortPolicy {
     /**

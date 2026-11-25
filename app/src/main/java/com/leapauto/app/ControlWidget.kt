@@ -33,7 +33,6 @@ import java.util.concurrent.TimeUnit
 class ControlWidget : AppWidgetProvider() {
 
     companion object {
-        const val ACTION_WIDGET_COMMAND = "com.leapauto.app.action.WIDGET_COMMAND"
 
         /** 在不重建布局的前提下，把控车进度回写到所有桌面插件实例。 */
         fun showControlStatus(
@@ -1060,11 +1059,8 @@ class ControlWidget : AppWidgetProvider() {
 
         internal fun click(context: Context, command: String): PendingIntent {
             val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-            val intent = Intent(context, ControlWidget::class.java).apply {
-                action = ACTION_WIDGET_COMMAND
-                putExtra(ControlService.EXTRA_COMMAND, command)
-            }
-            return PendingIntent.getBroadcast(context, command.hashCode(), intent, flags)
+            return PendingIntent.getActivity(context, command.hashCode(),
+                ControlRequestActivity.commandIntent(context, command), flags)
         }
 
         internal fun widgetUsesDarkAppearance(context: Context): Boolean {
@@ -1265,22 +1261,6 @@ class ControlWidget : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         when (intent.action) {
-            ACTION_WIDGET_COMMAND -> {
-                val command = intent.getStringExtra(ControlService.EXTRA_COMMAND)
-                if (!command.isNullOrBlank()) {
-                    SessionStore(context).setWidgetBusyCommand(command)
-                    refreshData(context)
-                    val serviceIntent = Intent(context, ControlService::class.java).apply {
-                        putExtra(ControlService.EXTRA_COMMAND, command)
-                    }
-                    try {
-                        androidx.core.content.ContextCompat.startForegroundService(context, serviceIntent)
-                    } catch (e: Exception) {
-                        android.util.Log.e("ControlWidget", "Failed to start ControlService: ${e.message}")
-                    }
-                }
-                return
-            }
             Intent.ACTION_CONFIGURATION_CHANGED -> {
                 refreshAppearance(context)
                 return

@@ -183,6 +183,8 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.SecureFlagPolicy
 import com.leapauto.app.AcTemperatureTarget
 import com.leapauto.app.AirCircle
 import com.leapauto.app.AirConditioningCommand
@@ -321,9 +323,8 @@ fun LeapAutoScreen(
     availableVehicles: List<Vehicle> = emptyList(),
     onSwitchVehicle: (String) -> Unit = {},
     hvacCapability: HvacCapability = HvacCapability.fallback(),
-    pinSaved: Boolean,
-    pinSetupInProgress: Boolean,
-    pinSetupErrorMessage: String = "",
+    showOperationPinPrompt: Boolean,
+    operationPinErrorMessage: String = "",
     showVehicleConfigConfirmationPrompt: Boolean,
     bluetoothState: BleConnectionState = BleConnectionState(),
     bluetoothKeyFeatureEnabled: Boolean = false,
@@ -383,8 +384,8 @@ fun LeapAutoScreen(
     onDismissGeetest: () -> Unit,
     onLoginWithRawAuth: (String, String) -> Unit = { _, _ -> },
     onLogin: () -> Unit,
-    onSavePin: () -> Unit,
-    onCancelPinSetup: () -> Unit,
+    onSubmitPin: () -> Unit,
+    onCancelPin: () -> Unit,
     onAppearanceModeChange: (AppearanceMode) -> Unit,
     onSaveVehicleConfig: (String, String, SessionStore.VehiclePowerType?, String, String) -> Unit = { _, _, _, _, _ -> },
     onNetworkDebugEnabledChange: (Boolean) -> Unit = {},
@@ -501,12 +502,12 @@ fun LeapAutoScreen(
             loggedIn = loggedIn,
             onVehicleTab = selectedTab == MainNavigationTabs.VEHICLE
         ) &&
-        !pinSetupInProgress &&
+        !showOperationPinPrompt &&
         !showVehicleConfigConfirmationPrompt &&
         !showSessionExpiredDialog
-    val hasBlockingPrompt = pinSetupInProgress ||
+    val hasBlockingPrompt = showOperationPinPrompt ||
         showVehicleConfigConfirmationPrompt || showSessionExpiredDialog ||
-        shouldShowVersionUpdatePrompt || (showPowerTypeDialog && !pinSetupInProgress)
+        shouldShowVersionUpdatePrompt || (showPowerTypeDialog && !showOperationPinPrompt)
     val closeSubpage: () -> Unit = {
         if (showAuthorSupportScreen) {
             showAuthorSupportScreen = false
@@ -571,77 +572,8 @@ fun LeapAutoScreen(
         }
     }
 
-    if (loggedIn && pinSetupInProgress && !showSessionExpiredDialog) {
-        AlertDialog(
-            onDismissRequest = onCancelPinSetup,
-            modifier = Modifier.solidDialogModifier(),
-            containerColor = MaterialTheme.colorScheme.surface,
-            tonalElevation = 0.dp,
-            shape = RoundedCornerShape(24.dp),
-            title = {
-                Text(
-                    text = if (pinSetupErrorMessage.isNotBlank()) "更新操控密码" else "设置操控密码",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (pinSetupErrorMessage.isNotBlank()) {
-                        Surface(
-                            shape = RoundedCornerShape(8.dp),
-                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
-                            border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f)),
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.ic_phosphor_warning),
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Text(
-                                    pinSetupErrorMessage,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.error,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        }
-                    } else {
-                        Text(
-                            "请输入零跑APP上您设置过的4位操控密码。保存后用于远程控车指令鉴权。",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    OutlinedTextField(
-                        value = pin,
-                        onValueChange = onPinChange,
-                        label = { Text("4 位数字密码") },
-                        placeholder = { Text("请输入4位数字控车密码") },
-                        singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    enabled = pin.matches(Regex("\\d{4}")),
-                    onClick = onSavePin
-                ) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = onCancelPinSetup) { Text("取消") }
-            }
-        )
+    if (loggedIn && showOperationPinPrompt && !showSessionExpiredDialog) {
+        OperationPinDialog(pin, onPinChange, onSubmitPin, onCancelPin, operationPinErrorMessage)
     }
 
     if (loggedIn && showSessionExpiredDialog) {
@@ -683,7 +615,7 @@ fun LeapAutoScreen(
         )
     }
 
-    if (showPowerTypeDialog && !pinSetupInProgress) {
+    if (showPowerTypeDialog && !showOperationPinPrompt) {
         val detectedPowerType = vehicleConfig.powerType
             ?: if (status?.rangeExtender == true) SessionStore.VehiclePowerType.RANGE_EXTENDER
                else SessionStore.VehiclePowerType.PURE_ELECTRIC
@@ -786,7 +718,7 @@ fun LeapAutoScreen(
             },
             text = {
                 Text(
-                    text = "确定要退出当前账号吗？退出后将清除本地会话与操控密码，桌面插件也将暂停更新。",
+                    text = "确定要退出当前账号吗？退出后将清除本地会话，桌面插件也将暂停更新。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -1111,12 +1043,6 @@ fun LeapAutoScreen(
                                     hasConfiguredAmapKey = com.leapauto.app.AmapApiKeyManager.hasConfiguredKey(amapContext)
                                 },
                                 phone = phone,
-                                pinSaved = pinSaved,
-                                pin = pin,
-                                onPinChange = onPinChange,
-                                onSavePin = onSavePin,
-                                pinSetupInProgress = pinSetupInProgress,
-                                onCancelPinSetup = onCancelPinSetup,
                                 widget4x2Actions = widget4x2Actions,
                                 onWidget4x2ActionsChange = onWidget4x2ActionsChange,
                                 widgetBackgroundStyle = widgetBackgroundStyle,
@@ -1737,12 +1663,6 @@ private fun MyContent(
     onAmapConfigurationOpened: () -> Unit = {},
     onAmapConfigurationChanged: () -> Unit = {},
     phone: String = "",
-    pinSaved: Boolean,
-    pin: String,
-    onPinChange: (String) -> Unit,
-    onSavePin: () -> Unit,
-    pinSetupInProgress: Boolean,
-    onCancelPinSetup: () -> Unit,
     widget4x2Actions: List<String> = Widget4x2ActionPolicy.DEFAULT_ACTIONS,
     onWidget4x2ActionsChange: (List<String>) -> Unit = {},
     widgetBackgroundStyle: Int = SessionStore.WIDGET_BG_STYLE_DEFAULT,
@@ -12673,3 +12593,85 @@ fun neutralButtonBorder() = androidx.compose.foundation.BorderStroke(
     MaterialTheme.colorScheme.outlineVariant
 )
 
+
+@Composable
+internal fun OperationPinDialog(
+    pin: String,
+    onPinChange: (String) -> Unit,
+    onSubmitPin: () -> Unit,
+    onCancelPin: () -> Unit,
+    errorMessage: String = "",
+    instruction: String = "请输入零跑 App 中设置的 4 位数字操控密码，以发送本次指令。"
+) {
+    AlertDialog(
+        onDismissRequest = onCancelPin,
+        properties = DialogProperties(securePolicy = SecureFlagPolicy.SecureOn),
+        modifier = Modifier.solidDialogModifier(),
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        shape = RoundedCornerShape(24.dp),
+        title = {
+            Text(
+                text = "输入操控密码",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (errorMessage.isNotBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f),
+                        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_phosphor_warning),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Text(
+                                errorMessage,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                } else {
+                    Text(
+                        instruction,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                OutlinedTextField(
+                    value = pin,
+                    onValueChange = onPinChange,
+                    label = { Text("4 位数字密码") },
+                    placeholder = { Text("请输入4位数字控车密码") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = com.leapauto.app.OperationPin.isValid(pin),
+                onClick = onSubmitPin
+            ) { Text("确定") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancelPin) { Text("取消") }
+        }
+    )
+}

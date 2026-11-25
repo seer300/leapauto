@@ -253,10 +253,9 @@ class MainActivity : ComponentActivity() {
     private var climatePreControlStatus: VehicleStatus? = null
     @Volatile private var pendingClimateConfirmation: PendingClimateConfirmation? = null
     private var pendingStatusRefreshCompletion: ((Boolean) -> Unit)? = null
-    private var pinSaved by mutableStateOf(false)
-    private var pinSetupInProgress by mutableStateOf(false)
-    private var pinSetupErrorMessage by mutableStateOf("")
-    private var pendingPinProtectedAction: (() -> Unit)? = null
+    private var showOperationPinPrompt by mutableStateOf(false)
+    private var operationPinErrorMessage by mutableStateOf("")
+    private var pendingPinProtectedAction: ((String) -> Unit)? = null
     private var pendingPinProtectedCancelAction: (() -> Unit)? = null
     private var showVehicleConfigConfirmationPrompt by mutableStateOf(false)
     private var phone by mutableStateOf("")
@@ -308,7 +307,6 @@ class MainActivity : ComponentActivity() {
     private var bluetoothState by mutableStateOf(BleConnectionState())
     private var bluetoothSessionIdentity: BleSessionIdentity? = null
     private var bluetoothControlConfirmation by mutableStateOf<BleControlConfirmation?>(null)
-    private var bluetoothPinRequestPending = false
     private var bluetoothReconnectDevice by mutableStateOf<BleNearbyDevice?>(null)
     private var bluetoothCertificate by mutableStateOf<BleKeyCertificate?>(null)
     private var bluetoothCertificateLoading by mutableStateOf(false)
@@ -385,8 +383,6 @@ class MainActivity : ComponentActivity() {
             defaultYear = session.selectedYear,
             defaultPowerType = defaultPower
         )
-        pin = sessionStore.loadOpPassword() ?: ""
-        pinSaved = pin.isNotBlank()
         widget4x2Actions = sessionStore.loadWidget4x2Actions()
         widgetBackgroundStyle = sessionStore.loadWidgetBackgroundStyle()
         widgetOpacity = sessionStore.loadWidgetOpacity()
@@ -437,9 +433,6 @@ class MainActivity : ComponentActivity() {
         }
         ChargeNotificationManager.ensureChannel(this)
         ParkingAnomalyNotificationManager.ensureChannel(this)
-        if (pinSaved) {
-            checkAndPromptPowerType(session.selectedVin)
-        }
 
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -472,9 +465,8 @@ class MainActivity : ComponentActivity() {
                         VehicleStatusMapper.resolveDisplayModel(vehicleConfig.model, session.selectedCarType),
                         vehicleConfig.color
                     ),
-                    pinSaved = pinSaved,
-                    pinSetupInProgress = pinSetupInProgress,
-                    pinSetupErrorMessage = pinSetupErrorMessage,
+                    showOperationPinPrompt = showOperationPinPrompt,
+                    operationPinErrorMessage = operationPinErrorMessage,
                     showVehicleConfigConfirmationPrompt = showVehicleConfigConfirmationPrompt,
                     availableVehicles = availableVehicles,
                     onSwitchVehicle = ::switchVehicle,
@@ -501,10 +493,12 @@ class MainActivity : ComponentActivity() {
                     scheduledPreheatDays = scheduledPreheatDays,
                     scheduledAcPlan = scheduledAcPlan,
                     scheduledAcSupported = ScheduledAcVisibilityPolicy.shouldShow(scheduledAcCapability),
-                    onApplyChargingSettings = ::applyHealthyAndScheduledCharging,
-                    onApplyScheduledPreheat = ::applyScheduledBatteryPreheat,
-                    onApplyScheduledAc = ::applyScheduledAirConditioning,
-                    onCancelScheduledAc = ::cancelScheduledAirConditioning,
+                    onApplyChargingSettings = { enabled, soc, scheduled, start, end, keepCharging, circulation, cycles ->
+                        applyHealthyAndScheduledCharging(enabled, soc, scheduled, start, end, keepCharging, circulation, cycles)
+                    },
+                    onApplyScheduledPreheat = { enabled, time, days -> applyScheduledBatteryPreheat(enabled, time, days) },
+                    onApplyScheduledAc = { applyScheduledAirConditioning(it) },
+                    onCancelScheduledAc = { cancelScheduledAirConditioning(it) },
                     onLoadScheduledAc = ::fetchScheduledAcForEditor,
                     openScheduledAcSheet = openScheduledAcOnLaunch,
                     onDismissScheduledAcSheet = { openScheduledAcOnLaunch = false },
@@ -524,7 +518,7 @@ class MainActivity : ComponentActivity() {
                     code = code,
                     onCodeChange = { code = it.take(6) },
                     pin = pin,
-                    onPinChange = { pin = it.take(4) },
+                    onPinChange = { pin = OperationPin.filterInput(it) },
                     onSendSms = ::sendSms,
                     smsCountdownSeconds = smsCountdownSeconds,
                     geetestChallenge = activeGeetestChallenge,
@@ -532,8 +526,8 @@ class MainActivity : ComponentActivity() {
                     onDismissGeetest = { activeGeetestChallenge = null },
                     onLoginWithRawAuth = ::loginWithRawAuth,
                     onLogin = { login() },
-                    onSavePin = ::savePin,
-                    onCancelPinSetup = ::cancelPinSetup,
+                    onSubmitPin = ::submitPin,
+                    onCancelPin = ::cancelPin,
                     widget4x2Actions = widget4x2Actions,
                     onWidget4x2ActionsChange = ::saveWidget4x2Actions,
                     widgetBackgroundStyle = widgetBackgroundStyle,
@@ -562,7 +556,7 @@ class MainActivity : ComponentActivity() {
                     onAutoRefreshActiveChange = ::setAutoRefreshActive,
                     onLogout = ::logout,
                     onControl = { control(it) },
-                    onFridgeControl = ::handleFridgeControl,
+                    onFridgeControl = { handleFridgeControl(it) },
                     onApplyClimateSettings = ::applyClimateSettings,
                     onDismissControlFeedback = { controlFeedback = null },
                     onQuickAc = ::quickAc,
@@ -572,7 +566,7 @@ class MainActivity : ComponentActivity() {
                     chargingControlFeedback = chargingControlFeedback,
                     chargingControlInProgress = chargingControlInProgress
                 )
-                if (showBluetoothKey && !pinSetupInProgress) {
+                if (showBluetoothKey && !showOperationPinPrompt) {
                     BluetoothKeyDialog(
                         state = bluetoothState,
                         permissionsGranted = bluetoothPermissionsGranted,
@@ -613,7 +607,7 @@ class MainActivity : ComponentActivity() {
                         carType = session.selectedCarType
                     )
                 }
-                bluetoothControlConfirmation?.takeIf { showBluetoothKey && !pinSetupInProgress }?.let { confirmation ->
+                bluetoothControlConfirmation?.takeIf { showBluetoothKey && !showOperationPinPrompt }?.let { confirmation ->
                     BluetoothActionConfirmation(
                         action = confirmation.action,
                         enabled = isCurrentBluetoothConfirmation(confirmation),
@@ -1058,67 +1052,45 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestBluetoothConfiguration(configuration: BlePassiveConfiguration) {
-        val identity = currentBluetoothIdentity() ?: run {
+        if (currentBluetoothIdentity() == null) {
             toast("未找到车辆信息，请检查登录状态")
             return
         }
-        val performSave = {
-            val desired = configuration
-            val calibrationChanged = configuration.calibration != bluetoothCloudState.profile.calibration
-            if (calibrationChanged) {
-                bluetoothCloud.saveCalibration(configuration.calibration) {}
-            }
-            val success = bluetoothCloud.saveConfiguration(desired) {
-                bluetoothRuntime.applyConfiguration(desired)
-            }
-            if (success) {
-                toast("设置已保存，正在同步车端与云端")
-            } else {
-                toast("设置保存未完成，请检查权限与网络")
-            }
+        val desired = configuration
+        val calibrationChanged = configuration.calibration != bluetoothCloudState.profile.calibration
+        if (calibrationChanged) {
+            bluetoothCloud.saveCalibration(configuration.calibration) {}
         }
-        if (sessionStore.loadOpPassword().isNullOrBlank()) {
-            bluetoothPinRequestPending = true
-            requestOperationPassword(action = {
-                bluetoothPinRequestPending = false
-                performSave()
-            }, onCancel = { bluetoothPinRequestPending = false })
+        val success = bluetoothCloud.saveConfiguration(desired) {
+            bluetoothRuntime.applyConfiguration(desired)
+        }
+        if (success) {
+            toast("设置已保存，正在同步车端与云端")
         } else {
-            performSave()
+            toast("设置保存未完成，请检查权限与网络")
         }
     }
 
     private fun requestBluetoothCalibration(calibration: BleCalibration?) {
-        val identity = currentBluetoothIdentity() ?: run {
+        if (currentBluetoothIdentity() == null) {
             toast("未找到车辆信息，请检查登录状态")
             return
         }
-        val performSave = {
-            val bound = bluetoothManagedKey
-            val configuration = bound?.desired?.copy(calibration = calibration ?: BleCalibration.DEFAULT)
-            val saved = bluetoothCloud.saveCalibration(calibration) {
-                if (configuration != null) bluetoothRuntime.applyConfiguration(configuration)
-            }
-            if (saved) {
-                bluetoothKeyController.recordDiagnostic(BleDiagnosticEvent.CALIBRATION_SAVED, if (calibration == null) 0 else 1)
-                toast(if (calibration == null) "已恢复默认标定" else "标定参数已应用并保存")
-            } else {
-                toast("标定保存失败，请检查网络后重试")
-            }
+        val bound = bluetoothManagedKey
+        val configuration = bound?.desired?.copy(calibration = calibration ?: BleCalibration.DEFAULT)
+        val saved = bluetoothCloud.saveCalibration(calibration) {
+            if (configuration != null) bluetoothRuntime.applyConfiguration(configuration)
         }
-        if (sessionStore.loadOpPassword().isNullOrBlank()) {
-            bluetoothPinRequestPending = true
-            requestOperationPassword(action = {
-                bluetoothPinRequestPending = false
-                performSave()
-            }, onCancel = { bluetoothPinRequestPending = false })
+        if (saved) {
+            bluetoothKeyController.recordDiagnostic(BleDiagnosticEvent.CALIBRATION_SAVED, if (calibration == null) 0 else 1)
+            toast(if (calibration == null) "已恢复默认标定" else "标定参数已应用并保存")
         } else {
-            performSave()
+            toast("标定保存失败，请检查网络后重试")
         }
     }
 
     private fun retryBluetoothCloudSync() {
-        if (isBluetoothForegroundContext() && !busy && !sessionStore.loadOpPassword().isNullOrBlank()) {
+        if (isBluetoothForegroundContext() && !busy) {
             bluetoothCloud.retryUploads()
         }
     }
@@ -1126,7 +1098,7 @@ class MainActivity : ComponentActivity() {
     private fun resumeBluetoothBackground() {
         if (!isBluetoothForegroundContext()) return
         runCatching { bluetoothRuntime.startBackground() }
-            .onFailure { toast("无法恢复后台连接，请检查蓝牙权限和操控密码") }
+            .onFailure { toast("无法恢复后台连接，请检查蓝牙权限") }
     }
 
     private fun requestBluetoothLockControl(action: BleLockAction) {
@@ -1138,14 +1110,6 @@ class MainActivity : ComponentActivity() {
         val identity = currentBluetoothIdentity() ?: return
         if (bluetoothSessionIdentity != identity) return
         val confirmation = BleControlConfirmation(action, identity, bluetoothGeneration)
-        if (sessionStore.loadOpPassword().isNullOrBlank()) {
-            bluetoothPinRequestPending = true
-            requestOperationPassword(action = {
-                bluetoothPinRequestPending = false
-                if (isCurrentBluetoothConfirmation(confirmation)) bluetoothControlConfirmation = confirmation
-            }, onCancel = { bluetoothPinRequestPending = false })
-            return
-        }
         bluetoothControlConfirmation = confirmation
     }
 
@@ -1159,18 +1123,10 @@ class MainActivity : ComponentActivity() {
         if (bluetoothControlConfirmation != confirmation) return
         bluetoothControlConfirmation = null
         if (!isCurrentBluetoothConfirmation(confirmation)) return
-        if (sessionStore.loadOpPassword().isNullOrBlank()) return
         bluetoothKeyController.control(confirmation.action)
     }
 
     private fun executeDirectBluetoothLockControl(isLock: Boolean) {
-        val savedPin = sessionStore.loadOpPassword()
-        if (savedPin.isNullOrEmpty()) {
-            requestOperationPassword(
-                action = { executeDirectBluetoothLockControl(isLock) }
-            )
-            return
-        }
         val action = if (isLock) BleLockAction.LOCK else BleLockAction.UNLOCK
         val actionName = if (isLock) "lock" else "unlock"
         val label = if (isLock) "上锁" else "解锁"
@@ -1230,10 +1186,6 @@ class MainActivity : ComponentActivity() {
         bluetoothGeneration++
         bluetoothControlConfirmation = null
         bluetoothConfigurationIdentity = null
-        if (bluetoothPinRequestPending) {
-            clearPendingPinProtectedAction(cancel = true)
-            pinSetupInProgress = false
-        }
         bluetoothCertificateJob?.cancel()
         bluetoothCertificateJob = null
         bluetoothCertificateLoading = false
@@ -1267,7 +1219,6 @@ class MainActivity : ComponentActivity() {
         clearChargingControlState()
         clearBluetoothState(closePage = true)
         clearPendingPinProtectedAction(cancel = true)
-        pinSetupInProgress = false
         showVehicleConfigConfirmationPrompt = false
         showSessionExpiredDialog = true
     }
@@ -1277,6 +1228,7 @@ class MainActivity : ComponentActivity() {
         resourceWorker.close()
         chargingTelemetryWorker.close()
         clearChargingControlState()
+        cancelPin()
         clearBluetoothState(closePage = true, endSession = false)
         activityDestroyed = true
         cancelPendingControlStatusRefreshes()
@@ -1317,6 +1269,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        cancelPin()
         bluetoothRuntime.setForeground(false)
         clearBluetoothState(closePage = false)
         super.onStop()
@@ -1494,7 +1447,7 @@ class MainActivity : ComponentActivity() {
                     toast("登录成功")
                     activeGeetestChallenge = null
                     loggedIn = true
-                    beginPostLoginPrompts(isNewLogin = true)
+                    beginPostLoginPrompts()
                     checkForUpdate()
                     refreshStatus()
                     refreshEnergy(force = true)
@@ -1544,7 +1497,7 @@ class MainActivity : ComponentActivity() {
                     hvacCapability = session.hvacCapability
                     toast("凭据导入成功，已绑定远控权限")
                     loggedIn = true
-                    beginPostLoginPrompts(isNewLogin = true)
+                    beginPostLoginPrompts()
                     checkForUpdate()
                     refreshStatus()
                     refreshEnergy(force = true)
@@ -1585,7 +1538,6 @@ class MainActivity : ComponentActivity() {
             .distinct()
             .forEach(sessionStore::clearVehiclePowerTypeConfirmation)
         sessionStore.clear()
-        sessionStore.saveOpPassword("")
         session = sessionStore.load()
         scheduledAcPlan = ScheduledAcPlan()
         scheduledAcCapability = ScheduledAcCapability.UNKNOWN
@@ -1593,9 +1545,6 @@ class MainActivity : ComponentActivity() {
         vehicleConfig = SessionStore.VehicleConfig()
         availableVehicles = emptyList()
         clearEnergyState()
-        pin = ""
-        pinSaved = false
-        pinSetupInProgress = false
         showVehicleConfigConfirmationPrompt = false
         code = ""
         status = null
@@ -1618,62 +1567,51 @@ class MainActivity : ComponentActivity() {
         toast("已登出")
     }
 
-    private fun savePin() {
-        if (!pin.matches(Regex("\\d{4}"))) {
-            toast("请输入 4 位数字操控密码")
-            return
-        }
-        sessionStore.saveOpPassword(pin)
-        pinSaved = true
-        val pendingAction = pendingPinProtectedAction
-        pendingPinProtectedAction = null
-        pendingPinProtectedCancelAction = null
-        pinSetupInProgress = false
-        pinSetupErrorMessage = ""
-        pin = ""
-        toast("操控密码已保存")
-        pendingAction?.invoke()
-        checkAndPromptPowerType(session.selectedVin)
+    private fun submitPin() {
+        if (!OperationPin.isValid(pin)) return
+        val submittedPin = pin
+        val action = pendingPinProtectedAction
+        clearPendingPinProtectedAction(cancel = false)
+        action?.invoke(submittedPin)
     }
 
-    private fun cancelPinSetup() {
-        pin = ""
-        pinSetupInProgress = false
-        pinSetupErrorMessage = ""
+    private fun cancelPin() {
         clearPendingPinProtectedAction(cancel = true)
-        checkAndPromptPowerType(session.selectedVin)
     }
 
     private fun requestOperationPassword(
-        action: () -> Unit,
-        onCancel: () -> Unit = {}
+        action: (String) -> Unit,
+        onCancel: () -> Unit = {},
+        errorMessage: String = ""
     ) {
-        pendingPinProtectedAction = action
+        if (!loggedIn || showSessionExpiredDialog || session.selectedVin.isBlank()) {
+            onCancel()
+            return
+        }
+        clearPendingPinProtectedAction(cancel = true)
+        val vin = session.selectedVin
+        val generation = session.generation
+        pendingPinProtectedAction = { enteredPin ->
+            if (loggedIn && !showSessionExpiredDialog &&
+                session.selectedVin == vin && session.generation == generation
+            ) {
+                action(enteredPin)
+            } else {
+                onCancel()
+            }
+        }
         pendingPinProtectedCancelAction = onCancel
-        pin = ""
-        pinSetupErrorMessage = ""
-        pinSetupInProgress = true
-    }
-
-    private fun promptUpdateOperationPassword(
-        errorMessage: String = OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE,
-        retryAction: (() -> Unit)? = null
-    ) {
-        bluetoothRuntime.stopBackground()
-        sessionStore.saveOpPassword("")
-        pinSaved = false
-        pin = ""
-        pinSetupErrorMessage = errorMessage
-        pendingPinProtectedAction = retryAction
-        pinSetupInProgress = true
-        controlFeedback = ControlFeedback(errorMessage, ControlFeedbackKind.ERROR)
-        toast(errorMessage)
+        operationPinErrorMessage = errorMessage
+        showOperationPinPrompt = true
     }
 
     private fun clearPendingPinProtectedAction(cancel: Boolean) {
         val cancelAction = pendingPinProtectedCancelAction
         pendingPinProtectedAction = null
         pendingPinProtectedCancelAction = null
+        pin = ""
+        operationPinErrorMessage = ""
+        showOperationPinPrompt = false
         if (cancel) cancelAction?.invoke()
     }
 
@@ -1940,8 +1878,16 @@ class MainActivity : ComponentActivity() {
         endTime: String,
         continueUntilLimit: Boolean,
         circulation: Int = 1,
-        cycles: String = "1,2,3,4,5,6,7"
+        cycles: String = "1,2,3,4,5,6,7",
+        enteredPin: String? = null
     ) {
+        if (enteredPin == null) {
+            requestOperationPassword(action = { enteredPin ->
+                applyHealthyAndScheduledCharging(healthyEnabled, targetSoc, scheduledEnabled, startTime, endTime,
+                    continueUntilLimit, circulation, cycles, enteredPin)
+            })
+            return
+        }
         val vin = session.selectedVin
         val vehicleCycles = ChargePlanCyclesHelper.toVehicleMask(cycles)
         val now = System.currentTimeMillis()
@@ -1977,21 +1923,24 @@ class MainActivity : ComponentActivity() {
             chargeScheduleRecharge = continueUntilLimit
         )
 
+        val controlSession = BackgroundSession(session, backgroundEpoch)
         val started = System.currentTimeMillis()
         worker.execute {
             try {
-                val api = LeapmotorApi(session)
+                if (!isCurrentBackground(controlSession)) return@execute
+                val api = LeapmotorApi(controlSession.request)
                 val respHealthy = api.setHealthyCharging(healthyEnabled, targetSoc)
+                mainHandler.post { mergeBackgroundCredentials(controlSession) }
                 val codeHealthy = respHealthy.optInt("code", respHealthy.optInt("result", -1))
                 val msgHealthy = respHealthy.optString("msg", respHealthy.optString("message", ""))
 
-                val savedPin = sessionStore.loadOpPassword().orEmpty()
+                if (!isCurrentBackground(controlSession)) return@execute
                 val respSched = api.setScheduledCharging(
                     enabled = scheduledEnabled,
                     startTime = startTime,
                     endTime = endTime,
                     targetSoc = targetSoc,
-                    opPassword = savedPin,
+                    opPassword = enteredPin,
                     continueUntilLimit = continueUntilLimit,
                     circulation = circulation,
                     cycles = vehicleCycles
@@ -2090,8 +2039,15 @@ class MainActivity : ComponentActivity() {
     private fun applyScheduledBatteryPreheat(
         enabled: Boolean,
         startTime: String,
-        days: String = "1,1,1,1,1,1,1"
+        days: String = "1,1,1,1,1,1,1",
+        enteredPin: String? = null
     ) {
+        if (enteredPin == null) {
+            requestOperationPassword(action = { enteredPin ->
+                applyScheduledBatteryPreheat(enabled, startTime, days, enteredPin)
+            })
+            return
+        }
         val vin = session.selectedVin
         val vehicleMask = ChargePlanCyclesHelper.toVehicleMask(days)
         sessionStore.saveScheduledPreheatEnabled(vin, enabled)
@@ -2101,14 +2057,16 @@ class MainActivity : ComponentActivity() {
         scheduledPreheatStartTime = startTime
         scheduledPreheatDays = vehicleMask
 
+        val controlSession = BackgroundSession(session, backgroundEpoch)
         val started = System.currentTimeMillis()
         worker.execute {
             try {
                 // 间隔 1.5 秒避开可能的并发控车锁，杜绝网关“系统繁忙”冲突
                 Thread.sleep(1500)
-                val api = LeapmotorApi(session)
-                val savedPin = sessionStore.loadOpPassword().orEmpty()
-                val resp = api.setScheduledBatteryPreheat(enabled, startTime, savedPin, vehicleMask)
+                if (!isCurrentBackground(controlSession)) return@execute
+                val api = LeapmotorApi(controlSession.request)
+                val resp = api.setScheduledBatteryPreheat(enabled, startTime, enteredPin, vehicleMask)
+                mainHandler.post { mergeBackgroundCredentials(controlSession) }
                 val code = resp.optInt("code", resp.optInt("result", -1))
                 val msg = resp.optString("msg", resp.optString("message", ""))
                 val isPreheatSuccess = code == 200 || code == 0
@@ -2246,7 +2204,11 @@ class MainActivity : ComponentActivity() {
         sessionStore.saveScheduledAcSteeringWheelHeating(vin, plan.steeringWheelHeating)
     }
 
-    private fun cancelScheduledAirConditioning(plan: ScheduledAcPlan) {
+    private fun cancelScheduledAirConditioning(plan: ScheduledAcPlan, enteredPin: String? = null) {
+        if (enteredPin == null) {
+            requestOperationPassword(action = { cancelScheduledAirConditioning(plan, it) })
+            return
+        }
         val vin = session.selectedVin
         val generation = session.generation
         val cancelledPlan = plan.copy(enabled = false)
@@ -2254,13 +2216,15 @@ class MainActivity : ComponentActivity() {
         scheduledAcPlan = cancelledPlan
         ScheduledAcScheduler.cancel(applicationContext, vin)
 
+        val controlSession = BackgroundSession(session, backgroundEpoch)
         worker.execute {
             try {
                 Thread.sleep(1200)
                 if (session.selectedVin != vin || session.generation != generation) return@execute
-                val api = LeapmotorApi(session)
-                val savedPin = sessionStore.loadOpPassword().orEmpty()
-                val resp = api.setScheduledAirConditioning(cancelledPlan, savedPin)
+                if (!isCurrentBackground(controlSession)) return@execute
+                val api = LeapmotorApi(controlSession.request)
+                val resp = api.setScheduledAirConditioning(cancelledPlan, enteredPin)
+                mainHandler.post { mergeBackgroundCredentials(controlSession) }
                 val code = resp.optInt("code", resp.optInt("result", -1))
                 val success = code == 200 || code == 0
                 mainHandler.post {
@@ -2277,7 +2241,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun applyScheduledAirConditioning(plan: ScheduledAcPlan) {
+    private fun applyScheduledAirConditioning(plan: ScheduledAcPlan, enteredPin: String? = null) {
+        if (plan.enabled && enteredPin == null) {
+            requestOperationPassword(action = { applyScheduledAirConditioning(plan, it) })
+            return
+        }
         val vin = session.selectedVin
         val generation = session.generation
         // 始终立即持久化到本地存储，确保用户在未开启或开启态下的各项偏好均能稳定回显
@@ -2290,14 +2258,16 @@ class MainActivity : ComponentActivity() {
             return
         }
 
+        val controlSession = BackgroundSession(session, backgroundEpoch)
         val started = System.currentTimeMillis()
         worker.execute {
             try {
                 Thread.sleep(1200)
                 if (session.selectedVin != vin || session.generation != generation) return@execute
-                val api = LeapmotorApi(session)
-                val savedPin = sessionStore.loadOpPassword().orEmpty()
-                val resp = api.setScheduledAirConditioning(plan, savedPin)
+                if (!isCurrentBackground(controlSession)) return@execute
+                val api = LeapmotorApi(controlSession.request)
+                val resp = api.setScheduledAirConditioning(plan, requireNotNull(enteredPin))
+                mainHandler.post { mergeBackgroundCredentials(controlSession) }
                 val code = resp.optInt("code", resp.optInt("result", -1))
                 val msg = resp.optString("msg", resp.optString("message", ""))
                 val success = code == 200 || code == 0
@@ -2323,8 +2293,8 @@ class MainActivity : ComponentActivity() {
                     if (plan.closeWindows) {
                         try {
                             Thread.sleep(1200)
-                            if (session.selectedVin == vin && session.generation == generation) {
-                                api.sendControl(Commands.build("windowClose"), savedPin)
+                            if (isCurrentBackground(controlSession)) {
+                                api.sendControl(Commands.build("windowClose"), requireNotNull(enteredPin))
                                 extraActions += " · 已关窗"
                             }
                         } catch (e: Exception) {
@@ -2334,8 +2304,8 @@ class MainActivity : ComponentActivity() {
                     if (plan.closeSunshade) {
                         try {
                             Thread.sleep(1200)
-                            if (session.selectedVin == vin && session.generation == generation) {
-                                api.sendControl(Commands.build("sunshadeClose"), savedPin)
+                            if (isCurrentBackground(controlSession)) {
+                                api.sendControl(Commands.build("sunshadeClose"), requireNotNull(enteredPin))
                                 extraActions += " · 已关遮阳帘"
                             }
                         } catch (e: Exception) {
@@ -2344,6 +2314,7 @@ class MainActivity : ComponentActivity() {
                     }
 
                     // 第二重保障：注册系统 AlarmManager 到点精准唤醒（到点由 ScheduledAcLinkageReceiver 联动开启方向盘与座椅舒适度）
+                    if (!isCurrentBackground(controlSession)) return@execute
                     ScheduledAcScheduler.schedule(applicationContext, vin, plan)
 
                     mainHandler.post {
@@ -2447,7 +2418,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun checkAndPromptPowerType(vin: String) {
-        if (vin.isNotBlank() && loggedIn && !pinSetupInProgress && !sessionStore.isVehiclePowerTypeConfirmed(vin)) {
+        if (vin.isNotBlank() && loggedIn && !showOperationPinPrompt && !sessionStore.isVehiclePowerTypeConfirmed(vin)) {
             showPowerTypeDialog = true
         }
     }
@@ -2468,16 +2439,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun beginPostLoginPrompts(isNewLogin: Boolean = false) {
+    private fun beginPostLoginPrompts() {
         showVehicleConfigConfirmationPrompt = false
-        if (PostLoginPinSetupPolicy.shouldPromptPinSetup(isNewLogin = isNewLogin, pinSaved = pinSaved)) {
-            pin = ""
-            pinSetupErrorMessage = ""
-            pinSetupInProgress = true
-        } else {
-            pinSetupInProgress = false
-            checkAndPromptPowerType(session.selectedVin)
-        }
+        checkAndPromptPowerType(session.selectedVin)
     }
 
     private fun openFeedback() {
@@ -3220,6 +3184,7 @@ class MainActivity : ComponentActivity() {
         val target = availableVehicles.firstOrNull { it.vin == targetVin } ?: return
         invalidateBackgroundTasks()
         clearChargingControlState()
+        cancelPin()
         clearBluetoothState(closePage = true)
         session.selectedVin = target.vin
         session.selectedCarType = target.carType
@@ -3403,17 +3368,18 @@ class MainActivity : ComponentActivity() {
         command: ControlCommand,
         climateTemperatureRequestId: Long? = null,
         optimisticUpdate: ClimateOptimisticUpdate? = null,
-        telemetryExpectation: ClimateTelemetryExpectation? = null
+        telemetryExpectation: ClimateTelemetryExpectation? = null,
+        enteredPin: String? = null
     ) {
-        val savedPin = sessionStore.loadOpPassword()
-        if (savedPin.isNullOrEmpty()) {
+        if (enteredPin == null) {
             requestOperationPassword(
                 action = {
                     submitClimateControl(
                         command = command,
                         climateTemperatureRequestId = climateTemperatureRequestId,
                         optimisticUpdate = optimisticUpdate,
-                        telemetryExpectation = telemetryExpectation
+                        telemetryExpectation = telemetryExpectation,
+                        enteredPin = it
                     )
                 },
                 onCancel = {
@@ -3434,6 +3400,7 @@ class MainActivity : ComponentActivity() {
             ClimateOptimisticGuard(climateControlRevision, it)
         }
         // 空调控制采用非阻塞后台调度 (showBusy = false)，不锁死整屏交互，保持极致跟手性
+        val controlSession = BackgroundSession(session, backgroundEpoch)
         busy(showBusy = false) { generation ->
             runOnMain(generation) {
                 controlFeedback = ControlFeedback(
@@ -3443,10 +3410,11 @@ class MainActivity : ComponentActivity() {
             }
             var postAccepted = false
             try {
-                val api = LeapmotorApi(session)
-                val result = api.sendControl(command, savedPin)
+                if (!isCurrentBackground(controlSession)) return@busy
+                val api = LeapmotorApi(controlSession.request)
+                val result = api.sendControl(command, enteredPin)
                 postAccepted = true
-                sessionStore.save(session)
+                mainHandler.post { mergeBackgroundCredentials(controlSession) }
                 val postDecision = ClimateControlPostPolicy.decision(
                     command,
                     postSucceeded = true,
@@ -3545,13 +3513,6 @@ class MainActivity : ComponentActivity() {
             pendingClimateConfirmation = null
             climateTemperatureRequestId?.let {
                 updateClimateTemperatureRequest(it, ClimateControlRequestPhase.FAILED)
-            }
-            if (OperationPasswordErrorPolicy.isPasswordError(error)) {
-                promptUpdateOperationPassword(
-                    errorMessage = OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE,
-                    retryAction = null
-                )
-                return@runOnMain
             }
             controlFeedback = ControlFeedback(
                 climateControlFailureMessage(command.label, error),
@@ -4255,7 +4216,7 @@ class MainActivity : ComponentActivity() {
             BackgroundSession(source, backgroundEpoch))
     }
 
-    private fun submitChargingControl(name: String) {
+    private fun submitChargingControl(name: String, enteredPin: String? = null) {
         if (activityDestroyed || chargingControlInProgress) return
         if (!loggedIn || showSessionExpiredDialog || session.selectedVin.isBlank()) {
             chargingControlFeedback = ControlFeedback("请先登录并选择车辆", ControlFeedbackKind.ERROR)
@@ -4270,14 +4231,13 @@ class MainActivity : ComponentActivity() {
         val context = chargingContext(name)
         awaitingChargingConfirmation = null
         chargingControlInProgress = true
-        val savedPin = sessionStore.loadOpPassword()
-        if (savedPin.isNullOrBlank()) {
-            chargingControlFeedback = ControlFeedback("需要设置四位操作密码后才能执行充电控制", ControlFeedbackKind.WARNING)
+        if (enteredPin == null) {
+            chargingControlFeedback = ControlFeedback("请输入四位操作密码以发送充电指令", ControlFeedbackKind.WARNING)
             requestOperationPassword(
                 action = {
                     if (isCurrentChargingControl(context)) {
                         chargingControlInProgress = false
-                        submitChargingControl(name)
+                        submitChargingControl(name, it)
                     }
                 },
                 onCancel = {
@@ -4290,7 +4250,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         chargingControlFeedback = ControlFeedback("正在发送充电指令…", ControlFeedbackKind.IN_PROGRESS)
-        worker.execute { executeChargingControl(context, savedPin) }
+        worker.execute { executeChargingControl(context, enteredPin) }
     }
 
     private fun saveChargingSession(context: ChargingControlContext) {
@@ -4312,7 +4272,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun executeChargingControl(context: ChargingControlContext, savedPin: String) {
+    private fun executeChargingControl(context: ChargingControlContext, enteredPin: String) {
         var postAccepted = false
         var stage = ChargingControlFailureStage.SUBMISSION
         try {
@@ -4329,7 +4289,7 @@ class MainActivity : ComponentActivity() {
             context.requestSession.oldAuth = context.credentialSnapshot.request.oldAuth
             context.requestSession.newAuth = context.credentialSnapshot.request.newAuth
             val api = LeapmotorApi(context.requestSession)
-            val result = api.sendControl(Commands.build(context.name), savedPin)
+            val result = api.sendControl(Commands.build(context.name), enteredPin)
             postAccepted = true
             val acceptedAtMs = android.os.SystemClock.elapsedRealtime()
             if (!isCurrentChargingControl(context)) return
@@ -4369,9 +4329,6 @@ class MainActivity : ComponentActivity() {
                         ControlFeedback(OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE, ControlFeedbackKind.ERROR)
                     } else ChargingControlPolicy.failureFeedback(postAccepted, stage)
                     handleSessionFailure(e)
-                    if (OperationPasswordErrorPolicy.isPasswordError(e)) {
-                        promptUpdateOperationPassword(retryAction = null)
-                    }
                 }
             }
         } finally {
@@ -4558,7 +4515,11 @@ class MainActivity : ComponentActivity() {
         control(Commands.build("trunkOpen"), commandName = "trunkOpen")
     }
 
-    private fun handleFridgeControl(command: FridgeControlCommand) {
+    private fun handleFridgeControl(command: FridgeControlCommand, enteredPin: String? = null) {
+        if (enteredPin == null) {
+            requestOperationPassword(action = { handleFridgeControl(command, it) })
+            return
+        }
         val controlCmd = Commands.buildFridgeControl(command)
         val commandName = if (command.enable) "fridgeOn" else "fridgeOff"
         // 15 秒车载冰箱乐观状态保护：0ms 同步本地状态，绝不被延迟回传的旧遥测弹回冲刷
@@ -4574,7 +4535,7 @@ class MainActivity : ComponentActivity() {
         lastFridgeActionEpochMs = System.currentTimeMillis()
         optimisticFridgeStatus = optimistic
         status = status?.copy(fridgeStatus = optimistic)
-        control(controlCmd, commandName = commandName)
+        control(controlCmd, commandName = commandName, enteredPin = enteredPin)
     }
 
     /** Routes a remote-control command through the existing safety path. */
@@ -4582,11 +4543,10 @@ class MainActivity : ComponentActivity() {
         control(command, commandName = null)
     }
 
-    private fun control(command: ControlCommand, commandName: String?) {
-        val savedPin = sessionStore.loadOpPassword()
-        if (savedPin.isNullOrEmpty()) {
+    private fun control(command: ControlCommand, commandName: String?, enteredPin: String? = null) {
+        if (enteredPin == null) {
             requestOperationPassword(
-                action = { control(command, commandName) }
+                action = { control(command, commandName, it) }
             )
             return
         }
@@ -4601,6 +4561,7 @@ class MainActivity : ComponentActivity() {
         }
 
         val sentryTarget = commandName?.let(SentryModeControlPolicy::targetEnabled)
+        val controlSession = BackgroundSession(session, backgroundEpoch)
         val started = System.currentTimeMillis()
         activeControlCommandName = effectiveCmdName
 
@@ -4826,10 +4787,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
             try {
-                val api = LeapmotorApi(session)
+                if (!isCurrentBackground(controlSession)) return@busy
+                val api = LeapmotorApi(controlSession.request)
                 if (sentryTarget != null) {
                     val latestBeforeSend = api.getVehicleState()
-                    sessionStore.save(session)
+                    mainHandler.post { mergeBackgroundCredentials(controlSession) }
                     val latestSentryMode = latestBeforeSend.optBool("sentryMode")
                     val latestStatus = parseStatus(latestBeforeSend)
                     runOnMain(generation) { status = latestStatus }
@@ -4844,8 +4806,9 @@ class MainActivity : ComponentActivity() {
                         return@busy
                     }
                 }
-                val result = api.sendControl(command, savedPin)
-                sessionStore.save(session)
+                if (!isCurrentBackground(controlSession)) return@busy
+                val result = api.sendControl(command, enteredPin)
+                mainHandler.post { mergeBackgroundCredentials(controlSession) }
                 val shouldQueryControlResult = result.hasPollingId()
                 if (!shouldQueryControlResult) {
                     runOnMain(generation) {
@@ -4866,7 +4829,7 @@ class MainActivity : ComponentActivity() {
                 for (i in 0 until ControlResultPollingPolicy.appMaxAttempts) {
                     Thread.sleep(ControlResultPollingPolicy.delayBeforeAttempt(i))
                     val resp = api.queryControlResult(result.msgID)
-                    sessionStore.save(session)
+                    mainHandler.post { mergeBackgroundCredentials(controlSession) }
                     val isConfirmed = ChargingControlPolicy.isQueryConfirmed(
                         resp.opt("result"),
                         resp.opt("code"),
@@ -4957,9 +4920,10 @@ class MainActivity : ComponentActivity() {
                     optimisticFridgeStatus = null
                     status = preControlStatus
                     if (OperationPasswordErrorPolicy.isPasswordError(e)) {
-                        promptUpdateOperationPassword(
-                            errorMessage = OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE,
-                            retryAction = { control(command, commandName) }
+                        controlFeedback = ControlFeedback(OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE, ControlFeedbackKind.ERROR)
+                        if (activityResumed) requestOperationPassword(
+                            action = { control(command, commandName, it) },
+                            errorMessage = OperationPasswordErrorPolicy.ERROR_PROMPT_MESSAGE
                         )
                         return@runOnMain
                     }

@@ -5,6 +5,7 @@ build/
 .kotlin/
 local.properties
 keystore/
+/APPkey/
 .idea/
 *.iml
 .vscode/

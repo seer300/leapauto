@@ -119,7 +119,6 @@ class BleKeyRuntime private constructor(context: Context) {
     fun applyConfiguration(configuration: BlePassiveConfiguration) {
         check(foreground && validSession())
         check(!connectionValue.value.isBusy) { "请等待当前蓝牙操作结束" }
-        check(!sessions.loadOpPassword().isNullOrBlank())
         check(controller.hasPermissions()) { "请先开启附近设备权限" }
         val bound = requireNotNull(keyValue.value) { "请先连接并认证车辆" }
         val certificate = sessions.loadBluetoothKeyCertificate(bound.accountId, bound.vin)
@@ -144,7 +143,6 @@ class BleKeyRuntime private constructor(context: Context) {
         cancelDisableFeature()
         check(foreground && validSession())
         check(controller.hasPermissions()) { "请先开启附近设备权限" }
-        check(!sessions.loadOpPassword().isNullOrBlank()) { "请先设置操控密码" }
         if (keyValue.value?.needsBackground != true) return
         if (runningValue.value) {
             if (!controller.state.isBusy) reconnectManaged()
@@ -162,8 +160,7 @@ class BleKeyRuntime private constructor(context: Context) {
 
     internal fun serviceStarted(): Boolean {
         if (identity == null) attachSession(sessions.load())
-        if (!validSession() || keyValue.value?.needsBackground != true || !controller.hasPermissions() ||
-            sessions.loadOpPassword().isNullOrBlank()) return false
+        if (!validSession() || keyValue.value?.needsBackground != true || !controller.hasPermissions()) return false
         if (runningValue.value) return true
         runningValue.value = true
         retryAttempt = 0
@@ -280,7 +277,7 @@ class BleKeyRuntime private constructor(context: Context) {
 
     private fun reconnectManaged() {
         if (!runningValue.value) return
-        if (!validSession() || !controller.hasPermissions() || sessions.loadOpPassword().isNullOrBlank()) {
+        if (!validSession() || !controller.hasPermissions()) {
             stopBackground()
             return
         }

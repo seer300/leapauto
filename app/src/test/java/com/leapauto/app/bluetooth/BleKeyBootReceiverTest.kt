@@ -11,12 +11,11 @@ class BleKeyBootReceiverTest {
     private val vin = "TESTVIN0000000001"
 
     @Test
-    fun `auto start succeeds on boot completed with valid session and background enabled`() {
+    fun `auto start succeeds on boot completed without a stored operation PIN`() {
         val allowed = BleKeyBootPolicy.shouldAutoStart(
             action = Intent.ACTION_BOOT_COMPLETED,
             accountId = accountId,
             selectedVin = vin,
-            hasOpPassword = true,
             needsBackground = true
         )
         assertTrue(allowed)
@@ -28,7 +27,6 @@ class BleKeyBootReceiverTest {
             action = Intent.ACTION_MY_PACKAGE_REPLACED,
             accountId = accountId,
             selectedVin = vin,
-            hasOpPassword = true,
             needsBackground = true
         )
         assertTrue(allowed)
@@ -40,20 +38,7 @@ class BleKeyBootReceiverTest {
             action = Intent.ACTION_BOOT_COMPLETED,
             accountId = accountId,
             selectedVin = vin,
-            hasOpPassword = true,
             needsBackground = false
-        )
-        assertFalse(allowed)
-    }
-
-    @Test
-    fun `auto start rejected when op password is missing`() {
-        val allowed = BleKeyBootPolicy.shouldAutoStart(
-            action = Intent.ACTION_BOOT_COMPLETED,
-            accountId = accountId,
-            selectedVin = vin,
-            hasOpPassword = false,
-            needsBackground = true
         )
         assertFalse(allowed)
     }
@@ -65,7 +50,6 @@ class BleKeyBootReceiverTest {
                 action = Intent.ACTION_BOOT_COMPLETED,
                 accountId = null,
                 selectedVin = vin,
-                hasOpPassword = true,
                 needsBackground = true
             )
         )
@@ -74,7 +58,6 @@ class BleKeyBootReceiverTest {
                 action = Intent.ACTION_BOOT_COMPLETED,
                 accountId = accountId,
                 selectedVin = "",
-                hasOpPassword = true,
                 needsBackground = true
             )
         )
@@ -86,7 +69,6 @@ class BleKeyBootReceiverTest {
             action = "android.intent.action.BATTERY_LOW",
             accountId = accountId,
             selectedVin = vin,
-            hasOpPassword = true,
             needsBackground = true
         )
         assertFalse(allowed)

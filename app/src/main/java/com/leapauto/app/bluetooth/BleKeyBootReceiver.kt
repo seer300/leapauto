@@ -15,16 +15,12 @@ object BleKeyBootPolicy {
         action: String?,
         accountId: String?,
         selectedVin: String?,
-        hasOpPassword: Boolean,
         needsBackground: Boolean
     ): Boolean {
         if (action != Intent.ACTION_BOOT_COMPLETED && action != Intent.ACTION_MY_PACKAGE_REPLACED) {
             return false
         }
         if (accountId.isNullOrBlank() || selectedVin.isNullOrBlank()) {
-            return false
-        }
-        if (!hasOpPassword) {
             return false
         }
         return needsBackground
@@ -44,7 +40,6 @@ class BleKeyBootReceiver : BroadcastReceiver() {
         val session = sessions.load()
         val accountId = session.oldAuth?.accountId
         val vin = session.selectedVin
-        val hasOpPassword = !sessions.loadOpPassword().isNullOrBlank()
 
         val keys = BleManagedKeyStore(appContext)
         val key = if (!accountId.isNullOrBlank() && vin.isNotBlank()) {
@@ -53,21 +48,13 @@ class BleKeyBootReceiver : BroadcastReceiver() {
         val needsBackground = key?.needsBackground == true
 
         if (action == Intent.ACTION_BOOT_COMPLETED || action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-            if (vin.isNotBlank() && hasOpPassword) {
-                val plan = com.leapauto.app.ScheduledAcPlan(
-                    enabled = sessions.loadScheduledAcEnabled(vin),
-                    startTime = sessions.loadScheduledAcStartTime(vin),
-                    days = sessions.loadScheduledAcDays(vin),
-                    closeWindows = sessions.loadScheduledAcCloseWindows(vin),
-                    closeSunshade = sessions.loadScheduledAcCloseSunshade(vin)
-                )
-                if (plan.enabled && (plan.closeWindows || plan.closeSunshade)) {
-                    com.leapauto.app.ScheduledAcScheduler.schedule(appContext, vin, plan)
-                }
+            if (vin.isNotBlank() && session.oldAuth != null && session.newAuth != null) {
+                val plan = com.leapauto.app.ScheduledAcLinkageReceiver.loadPlan(sessions, vin)
+                com.leapauto.app.ScheduledAcScheduler.schedule(appContext, vin, plan)
             }
         }
 
-        if (!BleKeyBootPolicy.shouldAutoStart(action, accountId, vin, hasOpPassword, needsBackground)) {
+        if (!BleKeyBootPolicy.shouldAutoStart(action, accountId, vin, needsBackground)) {
             return
         }
 

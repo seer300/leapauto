@@ -45,6 +45,11 @@ class ScheduledAcSheetSpecTest {
         assertTrue(source.contains("text = \"到点联动\""))
         assertTrue(source.contains("text = \"关闭车窗\""))
         assertTrue(source.contains("text = \"关闭遮阳帘\""))
+        val pinPrompt = "text = \"到点后请通过通知确认操控密码\""
+        val comfortSection = source.substringAfter("text = \"全车座椅舒适\"").substringBefore("text = \"到点联动\"")
+        val linkageSection = source.substringAfter("text = \"到点联动\"")
+        assertTrue(comfortSection.contains(pinPrompt))
+        assertTrue(linkageSection.contains(pinPrompt))
         assertFalse("座椅区不应再保留冗长重复的旧副标题", source.contains("定时到点时联动开启方向盘加热"))
         assertFalse("不应展示工程术语云端已就绪", source.contains("云端已就绪"))
         assertTrue(source.contains("定时未开启"))

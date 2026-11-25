@@ -102,7 +102,7 @@ class SupportAuthorModuleTest {
         val screenSource = readSourceFile("app/src/main/java/com/leapauto/app/ui/LeapAutoScreen.kt")
 
         assertTrue(activitySource.contains("private fun beginPostLoginPrompts("))
-        assertTrue(activitySource.contains("PostLoginPinSetupPolicy.shouldPromptPinSetup("))
+        assertFalse(activitySource.contains("PostLoginPinSetupPolicy"))
         assertTrue(activitySource.contains("checkAndPromptPowerType(session.selectedVin)"))
         assertFalse("Activity must not own support reminder state or scheduling",
             activitySource.contains("authorSupport", ignoreCase = true))

@@ -615,6 +615,12 @@ internal fun ScheduledAcPageContent(
                     }
                 }
 
+                Text(
+                    text = "到点后请通过通知确认操控密码",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
                 // 第一排：主驾与副驾
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -887,6 +893,12 @@ internal fun ScheduledAcPageContent(
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold,
                     color = MaterialTheme.colorScheme.onSurface
+                )
+
+                Text(
+                    text = "到点后请通过通知确认操控密码",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
                 Row(
